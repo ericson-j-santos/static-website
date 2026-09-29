@@ -1,0 +1,55 @@
+name: IA que Trabalha - voz neural PT-BR
+
+on:
+  push:
+    branches:
+      - ia-que-trabalha-voice-piper-v10-20260928
+    paths:
+      - .github/workflows/ia-que-trabalha-voice-piper.yml
+
+permissions:
+  contents: read
+
+jobs:
+  synthesize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Piper
+        run: |
+          python -m pip install --disable-pip-version-check piper-tts==1.8.0
+
+      - name: Download PT-BR voice
+        run: |
+          mkdir -p voice-model
+          python -m piper.download_voices --data-dir voice-model pt_BR-faber-medium
+
+      - name: Build narration
+        run: |
+          cat > narration.txt <<'EOF'
+          Essa planilha tem três erros. Você consegue encontrar os três em dez segundos?
+          Em vez de conferir linha por linha, selecione os dados e peça para a inteligência artificial procurar duplicados, datas inválidas e valores fora do padrão.
+          Aqui ela encontrou três suspeitas: uma linha duplicada, uma data impossível e um valor muito acima dos demais.
+          A inteligência artificial não decide por você. Ela reduz a busca. Você confere só o que realmente merece atenção.
+          EOF
+          python -m piper -m pt_BR-faber-medium --data-dir voice-model -f narration_raw.wav --input-file narration.txt --sentence-silence 0.28
+
+      - name: Normalize audio
+        run: |
+          ffmpeg -y -i narration_raw.wav -af "highpass=f=80,loudnorm=I=-16:TP=-1.5:LRA=7" narration_ptbr.wav
+          ffprobe -v error -show_entries format=duration -of default=nw=1 narration_ptbr.wav
+
+      - name: Upload narration
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia-que-trabalha-v10-voz-ptbr-piper
+          path: |
+            narration_ptbr.wav
+            narration.txt
+          if-no-files-found: error
+          retention-days: 3
