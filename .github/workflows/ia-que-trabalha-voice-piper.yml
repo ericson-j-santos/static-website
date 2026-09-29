@@ -1,4 +1,4 @@
-name: IA que Trabalha - voz neural PT-BR
+name: IA que Trabalha - comparacao vozes PT-BR
 
 on:
   push:
@@ -14,6 +14,12 @@ jobs:
   synthesize:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        voice:
+          - cadu
+          - jeff
     steps:
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -27,7 +33,7 @@ jobs:
       - name: Download PT-BR voice
         run: |
           mkdir -p voice-model
-          python -m piper.download_voices --data-dir voice-model pt_BR-faber-medium
+          python -m piper.download_voices --data-dir voice-model pt_BR-${{ matrix.voice }}-medium
 
       - name: Build narration
         run: |
@@ -37,19 +43,22 @@ jobs:
           Aqui ela encontrou três suspeitas: uma linha duplicada, uma data impossível e um valor muito acima dos demais.
           A inteligência artificial não decide por você. Ela reduz a busca. Você confere só o que realmente merece atenção.
           EOF
-          python -m piper -m pt_BR-faber-medium --data-dir voice-model -f narration_ptbr.wav --input-file narration.txt --sentence-silence 0.28
+          python -m piper -m pt_BR-${{ matrix.voice }}-medium --data-dir voice-model -f narration_${{ matrix.voice }}.wav --input-file narration.txt --sentence-silence 0.28
 
       - name: Validate audio
         run: |
-          python - <<'PY'
-          import json, wave
+          VOICE="${{ matrix.voice }}" python - <<'PY'
+          import json, os, wave
           from pathlib import Path
-          p = Path("narration_ptbr.wav")
+          voice = os.environ["VOICE"]
+          p = Path(f"narration_{voice}.wav")
           if not p.exists() or p.stat().st_size < 100000:
-              raise SystemExit("narration_ptbr.wav ausente ou pequeno demais")
+              raise SystemExit(f"{p.name} ausente ou pequeno demais")
           with wave.open(str(p), "rb") as w:
               duration = w.getnframes() / w.getframerate()
               meta = {
+                  "voice": voice,
+                  "model": f"pt_BR-{voice}-medium",
                   "duration_s": round(duration, 2),
                   "sample_rate": w.getframerate(),
                   "channels": w.getnchannels(),
@@ -58,17 +67,17 @@ jobs:
               }
           if not (20 <= duration <= 45):
               raise SystemExit(f"duração inesperada: {duration:.2f}s")
-          Path("narration_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+          Path(f"narration_{voice}_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
           print(json.dumps(meta))
           PY
 
       - name: Upload narration
         uses: actions/upload-artifact@v4
         with:
-          name: ia-que-trabalha-v10-voz-ptbr-piper
+          name: ia-que-trabalha-voz-${{ matrix.voice }}-ptbr
           path: |
-            narration_ptbr.wav
+            narration_${{ matrix.voice }}.wav
             narration.txt
-            narration_meta.json
+            narration_${{ matrix.voice }}_meta.json
           if-no-files-found: error
           retention-days: 3
