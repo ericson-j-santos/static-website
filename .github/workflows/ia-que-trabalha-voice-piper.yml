@@ -1,9 +1,9 @@
-name: IA que Trabalha - comparacao vozes PT-BR
+name: IA que Trabalha - Parler PT-BR native test
 
 on:
   push:
     branches:
-      - ia-que-trabalha-voice-piper-v10-20260928
+      - ia-que-trabalha-voice-parler-ptbr-20260928
     paths:
       - .github/workflows/ia-que-trabalha-voice-piper.yml
 
@@ -13,71 +13,111 @@ permissions:
 jobs:
   synthesize:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        voice:
-          - cadu
-          - jeff
+    timeout-minutes: 30
     steps:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.11"
 
-      - name: Install Piper
+      - name: Install CPU PyTorch
         run: |
-          python -m pip install --disable-pip-version-check piper-tts==1.8.0
+          python -m pip install --disable-pip-version-check --index-url https://download.pytorch.org/whl/cpu torch==2.6.0 torchaudio==2.6.0
 
-      - name: Download PT-BR voice
+      - name: Install Parler TTS
         run: |
-          mkdir -p voice-model
-          python -m piper.download_voices --data-dir voice-model pt_BR-${{ matrix.voice }}-medium
+          python -m pip install --disable-pip-version-check git+https://github.com/huggingface/parler-tts.git soundfile
 
-      - name: Build narration
+      - name: Generate PT-BR samples
         run: |
-          cat > narration.txt <<'EOF'
-          Essa planilha tem três erros. Você consegue encontrar os três em dez segundos?
-          Em vez de conferir linha por linha, selecione os dados e peça para a inteligência artificial procurar duplicados, datas inválidas e valores fora do padrão.
-          Aqui ela encontrou três suspeitas: uma linha duplicada, uma data impossível e um valor muito acima dos demais.
-          A inteligência artificial não decide por você. Ela reduz a busca. Você confere só o que realmente merece atenção.
-          EOF
-          python -m piper -m pt_BR-${{ matrix.voice }}-medium --data-dir voice-model -f narration_${{ matrix.voice }}.wav --input-file narration.txt --sentence-silence 0.28
-
-      - name: Validate audio
-        run: |
-          VOICE="${{ matrix.voice }}" python - <<'PY'
-          import json, os, wave
+          cat > generate_samples.py <<'PY'
+          import json
+          import torch
+          import soundfile as sf
           from pathlib import Path
-          voice = os.environ["VOICE"]
-          p = Path(f"narration_{voice}.wav")
-          if not p.exists() or p.stat().st_size < 100000:
-              raise SystemExit(f"{p.name} ausente ou pequeno demais")
-          with wave.open(str(p), "rb") as w:
-              duration = w.getnframes() / w.getframerate()
-              meta = {
-                  "voice": voice,
-                  "model": f"pt_BR-{voice}-medium",
+          from parler_tts import ParlerTTSForConditionalGeneration
+          from transformers import AutoTokenizer
+
+          MODEL_ID = "freds0/parler-tts-mini-v1.1-ptbr"
+          PROMPT_TOKENIZER = "parler-tts/parler-tts-mini-multilingual"
+          device = "cpu"
+          torch.manual_seed(42)
+
+          text = "Essa planilha tem três erros. Você consegue encontrar os três em dez segundos? A inteligência artificial ajuda a encontrar onde olhar primeiro."
+
+          descriptions = {
+              "diana": "Diana's speech is very clear and natural, with a calm moderate speaking rate, warm tone, close microphone, and very clear audio.",
+              "carolina": "Carolina's speech is very clear and natural, with a calm conversational speaking rate, confident tone, close microphone, and very clear audio.",
+              "rafael": "Rafael's speech is very clear and natural, with a calm moderate speaking rate, confident tone, close microphone, and very clear audio.",
+          }
+
+          model = ParlerTTSForConditionalGeneration.from_pretrained(MODEL_ID).to(device)
+          tokenizer = AutoTokenizer.from_pretrained(PROMPT_TOKENIZER)
+          description_tokenizer = AutoTokenizer.from_pretrained(model.config.text_encoder._name_or_path)
+
+          out = Path("samples")
+          out.mkdir(exist_ok=True)
+          metadata = {}
+
+          for name, description in descriptions.items():
+              torch.manual_seed(42)
+              input_ids = description_tokenizer(description, return_tensors="pt").input_ids.to(device)
+              prompt_input_ids = tokenizer(text, return_tensors="pt").input_ids.to(device)
+              generation = model.generate(
+                  input_ids=input_ids,
+                  prompt_input_ids=prompt_input_ids,
+                  do_sample=True,
+                  temperature=1.0,
+                  min_new_tokens=10,
+              )
+              audio = generation.cpu().numpy().squeeze()
+              path = out / f"parler_ptbr_{name}.wav"
+              sf.write(path, audio, model.config.sampling_rate)
+              duration = len(audio) / model.config.sampling_rate
+              metadata[name] = {
+                  "model": MODEL_ID,
+                  "description": description,
                   "duration_s": round(duration, 2),
-                  "sample_rate": w.getframerate(),
-                  "channels": w.getnchannels(),
-                  "sample_width_bytes": w.getsampwidth(),
-                  "size_bytes": p.stat().st_size,
+                  "sample_rate": model.config.sampling_rate,
+                  "size_bytes": path.stat().st_size,
               }
-          if not (20 <= duration <= 45):
-              raise SystemExit(f"duração inesperada: {duration:.2f}s")
-          Path(f"narration_{voice}_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
-          print(json.dumps(meta))
+              if not (4 <= duration <= 20):
+                  raise SystemExit(f"Duracao inesperada para {name}: {duration:.2f}s")
+              if path.stat().st_size < 100000:
+                  raise SystemExit(f"Arquivo pequeno demais: {path}")
+
+          Path("samples/metadata.json").write_text(
+              json.dumps(metadata, ensure_ascii=False, indent=2),
+              encoding="utf-8"
+          )
+          print(json.dumps(metadata, ensure_ascii=False))
+          PY
+          python generate_samples.py
+
+      - name: Validate native PT-BR outputs
+        run: |
+          python - <<'PY'
+          import json, wave
+          from pathlib import Path
+          meta = json.loads(Path("samples/metadata.json").read_text(encoding="utf-8"))
+          expected = {"diana", "carolina", "rafael"}
+          if set(meta) != expected:
+              raise SystemExit(f"vozes inesperadas: {set(meta)}")
+          for name in sorted(expected):
+              p = Path(f"samples/parler_ptbr_{name}.wav")
+              with wave.open(str(p), "rb") as w:
+                  if w.getnchannels() != 1:
+                      raise SystemExit(f"{name}: canais inesperados")
+                  duration = w.getnframes() / w.getframerate()
+                  if abs(duration - meta[name]["duration_s"]) > 0.1:
+                      raise SystemExit(f"{name}: metadado de duracao divergente")
+          print("E2E_OK samples=3 model=freds0/parler-tts-mini-v1.1-ptbr")
           PY
 
-      - name: Upload narration
+      - name: Upload PT-BR samples
         uses: actions/upload-artifact@v4
         with:
-          name: ia-que-trabalha-voz-${{ matrix.voice }}-ptbr
-          path: |
-            narration_${{ matrix.voice }}.wav
-            narration.txt
-            narration_${{ matrix.voice }}_meta.json
+          name: ia-que-trabalha-parler-ptbr-native-samples
+          path: samples/
           if-no-files-found: error
           retention-days: 3
